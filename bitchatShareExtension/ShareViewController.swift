@@ -189,7 +189,7 @@ class ShareViewController: SLComposeServiceViewController {
     
     private func saveToSharedDefaults(content: String, type: String) {
         // Use app groups to share data between extension and main app
-        guard let userDefaults = UserDefaults(suiteName: "group.chat.bitchat") else {
+        guard let userDefaults = UserDefaults(suiteName: "group.com.cypherbase.bitchat") else {
             print("ShareExtension: Failed to access app group UserDefaults")
             return
         }
