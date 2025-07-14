@@ -6,7 +6,7 @@ let package = Package(
     name: "bitchat",
     platforms: [
         .iOS(.v16),
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     products: [
         .executable(
@@ -14,9 +14,16 @@ let package = Package(
             targets: ["bitchat"]
         ),
     ],
+    dependencies: [
+        // Local CashuSwift package in parent directory
+        .package(path: "../CashuSwift")
+    ],
     targets: [
         .executableTarget(
             name: "bitchat",
+            dependencies: [
+                .product(name: "CashuSwift", package: "CashuSwift")
+            ],
             path: "bitchat"
         ),
     ]

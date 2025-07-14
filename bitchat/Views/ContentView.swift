@@ -27,6 +27,7 @@ struct ContentView: View {
     @State private var showCommandSuggestions = false
     @State private var commandSuggestions: [String] = []
     @State private var showLeaveChannelAlert = false
+    @State private var showWallet = false
     
     private var backgroundColor: Color {
         colorScheme == .dark ? Color.black : Color.white
@@ -119,6 +120,9 @@ struct ContentView: View {
         #endif
         .sheet(isPresented: $showAppInfo) {
             AppInfoView()
+        }
+        .sheet(isPresented: $showWallet) {
+            WalletView()
         }
         .alert("Set Channel Password", isPresented: $showPasswordInput) {
             SecureField("Password", text: $passwordInput)
@@ -317,7 +321,15 @@ struct ContentView: View {
                 }
             } else {
                 // Public chat header
-                HStack(spacing: 4) {
+                HStack(spacing: 8) {
+                    Button(action: { showWallet = true }) {
+                        Image(systemName: "wallet.pass")
+                            .font(.system(size: 16))
+                            .foregroundColor(textColor)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open wallet")
+                    
                     Text("bitchat*")
                         .font(.system(size: 18, weight: .medium, design: .monospaced))
                         .foregroundColor(textColor)
@@ -427,57 +439,10 @@ struct ContentView: View {
                     }()
                     
                     ForEach(messages, id: \.id) { message in
-                        VStack(alignment: .leading, spacing: 4) {
-                            // Check if current user is mentioned
-                            let _ = message.mentions?.contains(viewModel.nickname) ?? false
-                            
-                            if message.sender == "system" {
-                                // System messages
-                                Text(viewModel.formatMessageAsText(message, colorScheme: colorScheme))
-                                    .textSelection(.enabled)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            } else {
-                                // Regular messages with natural text wrapping
-                                VStack(alignment: .leading, spacing: 8) {
-                                    HStack(alignment: .top, spacing: 0) {
-                                        // Single text view for natural wrapping
-                                        Text(viewModel.formatMessageAsText(message, colorScheme: colorScheme))
-                                            .textSelection(.enabled)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                        
-                                        // Delivery status indicator for private messages
-                                        if message.isPrivate && message.sender == viewModel.nickname,
-                                           let status = message.deliveryStatus {
-                                            DeliveryStatusView(status: status, colorScheme: colorScheme)
-                                                .padding(.leading, 4)
-                                        }
-                                    }
-                                    
-                                    // Check for links and show preview
-                                    if let markdownLink = message.content.extractMarkdownLink() {
-                                        // Don't show link preview if the message is just the emoji
-                                        let cleanContent = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                                        if cleanContent.hasPrefix("👇") {
-                                            LinkPreviewView(url: markdownLink.url, title: markdownLink.title)
-                                                .padding(.top, 4)
-                                        }
-                                    } else {
-                                        // Check for plain URLs
-                                        let urls = message.content.extractURLs()
-                                        let _ = urls.isEmpty ? nil : print("DEBUG: Found \(urls.count) plain URLs in message")
-                                        ForEach(urls.prefix(3), id: \.url) { urlInfo in
-                                            LinkPreviewView(url: urlInfo.url, title: nil)
-                                                .padding(.top, 4)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 2)
-                        .id(message.id)
+                        MessageView(message: message, viewModel: viewModel, colorScheme: colorScheme)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 2)
+                            .id(message.id)
                     }
                 }
                 .padding(.vertical, 8)

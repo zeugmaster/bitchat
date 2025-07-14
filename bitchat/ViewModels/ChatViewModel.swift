@@ -1276,6 +1276,9 @@ class ChatViewModel: ObservableObject {
         // Disconnect from all peers
         meshService.emergencyDisconnectAll()
         
+        // Clear wallet data
+        WalletManager.shared.clearAllData()
+        
         // Force immediate UserDefaults synchronization
         userDefaults.synchronize()
         
