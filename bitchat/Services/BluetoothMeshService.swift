@@ -2627,29 +2627,40 @@ class BluetoothMeshService: NSObject {
         
         // Check if we have all fragments
         if let fragments = incomingFragments[fragmentID],
-           fragments.count == total {
+           let metadata = fragmentMetadata[fragmentID] {
             
-            // Reassemble the original packet
-            var reassembledData = Data()
-            for i in 0..<total {
-                if let fragment = fragments[i] {
-                    reassembledData.append(fragment)
-                } else {
-                    // Missing fragment
-                    return
+            // Check if we have all fragments by verifying each index exists
+            var hasAllFragments = true
+            for i in 0..<metadata.totalFragments {
+                if fragments[i] == nil {
+                    hasAllFragments = false
+                    break
                 }
             }
             
-            // Successfully reassembled fragments
-            
-            // Parse and handle the reassembled packet
-            if let reassembledPacket = BitchatPacket.from(reassembledData) {
-                // Clean up
-                incomingFragments.removeValue(forKey: fragmentID)
-                fragmentMetadata.removeValue(forKey: fragmentID)
+            if hasAllFragments {
+                // Reassemble the original packet
+                var reassembledData = Data()
+                for i in 0..<metadata.totalFragments {
+                    if let fragment = fragments[i] {
+                        reassembledData.append(fragment)
+                    } else {
+                        // This shouldn't happen as we just checked
+                        return
+                    }
+                }
                 
-                // Handle the reassembled packet
-                handleReceivedPacket(reassembledPacket, from: peerID, peripheral: nil)
+                // Successfully reassembled fragments
+                
+                // Parse and handle the reassembled packet
+                if let reassembledPacket = BitchatPacket.from(reassembledData) {
+                    // Clean up
+                    incomingFragments.removeValue(forKey: fragmentID)
+                    fragmentMetadata.removeValue(forKey: fragmentID)
+                    
+                    // Handle the reassembled packet
+                    handleReceivedPacket(reassembledPacket, from: peerID, peripheral: nil)
+                }
             }
         }
         
