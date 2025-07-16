@@ -1790,8 +1790,7 @@ class ChatViewModel: ObservableObject {
         // This will force creation of a new identity (new fingerprint) on next launch
         meshService.emergencyDisconnectAll()
         
-        // Clear wallet data
-        WalletManager.shared.clearAllData()
+
         
         // Force immediate UserDefaults synchronization
         userDefaults.synchronize()

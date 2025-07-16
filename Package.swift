@@ -6,25 +6,27 @@ let package = Package(
     name: "bitchat",
     platforms: [
         .iOS(.v16),
-        .macOS(.v14)
+        .macOS(.v13)
     ],
     products: [
         .executable(
             name: "bitchat",
-            targets: ["bitchat"]
-        ),
+            targets: ["bitchat"])
     ],
     dependencies: [
-        // Local CashuSwift package in parent directory
-        .package(path: "../CashuSwift")
     ],
     targets: [
         .executableTarget(
             name: "bitchat",
             dependencies: [
-                .product(name: "CashuSwift", package: "CashuSwift")
             ],
-            path: "bitchat"
-        ),
+            path: "bitchat",
+            resources: [
+                .process("Assets.xcassets"),
+                .process("LaunchScreen.storyboard"),
+                .process("Info-iOS.plist"),
+                .process("Info-macOS.plist")
+            ]
+        )
     ]
 )

@@ -27,7 +27,6 @@ struct ContentView: View {
     @State private var showCommandSuggestions = false
     @State private var commandSuggestions: [String] = []
     @State private var showLeaveChannelAlert = false
-    @State private var showWallet = false
     
     private var backgroundColor: Color {
         colorScheme == .dark ? Color.black : Color.white
@@ -364,14 +363,6 @@ struct ContentView: View {
             } else {
                 // Public chat header
                 HStack(spacing: 8) {
-                    Button(action: { showWallet = true }) {
-                        Image(systemName: "wallet.pass")
-                            .font(.system(size: 16))
-                            .foregroundColor(textColor)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Open wallet")
-                    
                     Text("bitchat*")
                         .font(.system(size: 18, weight: .medium, design: .monospaced))
                         .foregroundColor(textColor)
