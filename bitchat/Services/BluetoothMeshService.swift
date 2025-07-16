@@ -171,9 +171,12 @@ class BluetoothMeshService: NSObject {
     // Fragment handling with security limits
     private var incomingFragments: [String: [Int: Data]] = [:]  // fragmentID -> [index: data]
     private var fragmentMetadata: [String: (originalType: UInt8, totalFragments: Int, timestamp: Date)] = [:]
-    private let maxFragmentSize = 500  // Optimized for BLE 5.0 extended data length
-    private let maxConcurrentFragmentSessions = 20  // Limit concurrent fragment sessions to prevent DoS
-    private let fragmentTimeout: TimeInterval = 30  // 30 seconds timeout for incomplete fragments
+    // Reduced fragment size to ensure packets stay under BLE MTU after adding metadata
+    // Fragment metadata adds 13 bytes, plus padding can increase size
+    // Using 200 bytes ensures final packet stays well under 512 bytes
+    private let maxFragmentSize = 200  // Conservative size for BLE compatibility
+    private let maxConcurrentFragmentSessions = 50  // Increased limit for better fragment handling
+    private let fragmentTimeout: TimeInterval = 60  // 60 seconds timeout for incomplete fragments
     
     var myPeerID: String
     
@@ -769,6 +772,16 @@ class BluetoothMeshService: NSObject {
     func sendMessage(_ content: String, mentions: [String] = [], channel: String? = nil, to recipientID: String? = nil, messageID: String? = nil, timestamp: Date? = nil) {
         // Defensive check for empty content
         guard !content.isEmpty else { return }
+        
+        SecurityLogger.log("💬 SEND DEBUG: Preparing to send message", 
+                         category: SecurityLogger.noise, level: .info)
+        SecurityLogger.log("   Content length: \(content.count) chars", 
+                         category: SecurityLogger.noise, level: .debug)
+        SecurityLogger.log("   Channel: \(channel ?? "none")", 
+                         category: SecurityLogger.noise, level: .debug)
+        SecurityLogger.log("   Mentions: \(mentions.isEmpty ? "none" : mentions.joined(separator: ", "))", 
+                         category: SecurityLogger.noise, level: .debug)
+        
         messageQueue.async { [weak self] in
             guard let self = self else { return }
             
@@ -812,6 +825,15 @@ class BluetoothMeshService: NSObject {
                 }
                 
                 if shouldSend {
+                    SecurityLogger.log("   ✅ Message ready to send", 
+                                     category: SecurityLogger.noise, level: .info)
+                    SecurityLogger.log("   Message ID: \(msgID)", 
+                                     category: SecurityLogger.noise, level: .debug)
+                    SecurityLogger.log("   Payload size: \(messageData.count) bytes", 
+                                     category: SecurityLogger.noise, level: .debug)
+                    SecurityLogger.log("   Adaptive TTL: \(self.adaptiveTTL)", 
+                                     category: SecurityLogger.noise, level: .debug)
+                    
                     // Clean up old entries after 10 seconds
                     self.messageQueue.asyncAfter(deadline: .now() + 10.0) { [weak self] in
                         guard let self = self else { return }
@@ -820,15 +842,23 @@ class BluetoothMeshService: NSObject {
                     
                     // Add random delay before initial send
                     let initialDelay = self.randomDelay()
+                    SecurityLogger.log("   Initial delay: \(initialDelay)s", 
+                                     category: SecurityLogger.noise, level: .debug)
+                    
                     DispatchQueue.main.asyncAfter(deadline: .now() + initialDelay) { [weak self] in
                         self?.broadcastPacket(packet)
                     }
                     
-                    // Single retry for reliability
-                    let retryDelay = 0.3 + self.randomDelay()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay) { [weak self] in
-                        self?.broadcastPacket(packet)
-                        // Re-sending message
+                    // Disable automatic retry for fragmented messages
+                    // The fragmentation system handles its own reliability
+                    // Only retry non-fragmented messages
+                    if let data = packet.toBinaryData(), data.count <= 512 {
+                        // Single retry for reliability (only for small messages)
+                        let retryDelay = 0.3 + self.randomDelay()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay) { [weak self] in
+                            self?.broadcastPacket(packet)
+                            // Re-sending message
+                        }
                     }
                 }
             }
@@ -1606,40 +1636,78 @@ class BluetoothMeshService: NSObject {
         }
         
         // Check if fragmentation is needed for large packets
+        // Note: Fragment packets themselves should never be fragmented
         if data.count > 512 && packet.type != MessageType.fragmentStart.rawValue && 
            packet.type != MessageType.fragmentContinue.rawValue && 
            packet.type != MessageType.fragmentEnd.rawValue {
+            SecurityLogger.log("🚨 FRAGMENT DEBUG: Message size \(data.count) bytes exceeds 512, starting fragmentation", category: SecurityLogger.noise, level: .info)
+            SecurityLogger.log("   Original packet type: \(MessageType(rawValue: packet.type)?.description ?? "Unknown")", 
+                             category: SecurityLogger.noise, level: .info)
+            SecurityLogger.log("   Sender ID: \(packet.senderID.hexEncodedString())", 
+                             category: SecurityLogger.noise, level: .info)
+            SecurityLogger.log("   TTL: \(packet.ttl)", 
+                             category: SecurityLogger.noise, level: .info)
             sendFragmentedPacket(packet)
             return
+        } else {
+            SecurityLogger.log("📡 BROADCAST DEBUG: Sending non-fragmented packet", 
+                             category: SecurityLogger.noise, level: .debug)
+            SecurityLogger.log("   Type: \(MessageType(rawValue: packet.type)?.description ?? "Unknown")", 
+                             category: SecurityLogger.noise, level: .debug)
+            SecurityLogger.log("   Size: \(data.count) bytes", 
+                             category: SecurityLogger.noise, level: .debug)
         }
         
         // Send to connected peripherals (as central)
         var sentToPeripherals = 0
-        for (_, peripheral) in connectedPeripherals {
+        SecurityLogger.log("   📤 Broadcasting to \(connectedPeripherals.count) peripherals", 
+                         category: SecurityLogger.noise, level: .debug)
+        
+        for (peerID, peripheral) in connectedPeripherals {
+            // Double-check connection state to avoid API misuse warnings
+            guard peripheral.state == .connected else {
+                // Remove disconnected peripherals from our tracking
+                SecurityLogger.log("      ⚠️ Skipping disconnected peripheral \(peerID)", 
+                                 category: SecurityLogger.noise, level: .debug)
+                connectedPeripherals.removeValue(forKey: peerID)
+                peripheralCharacteristics.removeValue(forKey: peripheral)
+                continue
+            }
+            
             if let characteristic = peripheralCharacteristics[peripheral] {
-                // Check if peripheral is connected before writing
-                if peripheral.state == .connected {
-                    // Use withoutResponse for faster transmission when possible
-                    // Only use withResponse for critical messages or when MTU negotiation needed
-                    let writeType: CBCharacteristicWriteType = data.count > 512 ? .withResponse : .withoutResponse
+                // Always use withoutResponse for better compatibility and performance
+                // This avoids blocking on write confirmations which can fail for large packets
+                let writeType: CBCharacteristicWriteType = .withoutResponse
+                
+                // Additional safety check for characteristic properties
+                if characteristic.properties.contains(.write) || 
+                   characteristic.properties.contains(.writeWithoutResponse) {
+                    peripheral.writeValue(data, for: characteristic, type: writeType)
+                    sentToPeripherals += 1
                     
-                    // Additional safety check for characteristic properties
-                    if characteristic.properties.contains(.write) || 
-                       characteristic.properties.contains(.writeWithoutResponse) {
-                        peripheral.writeValue(data, for: characteristic, type: writeType)
-                        sentToPeripherals += 1
-                    }
-                } else {
-                    if let peerID = connectedPeripherals.first(where: { $0.value == peripheral })?.key {
-                        connectedPeripherals.removeValue(forKey: peerID)
-                        peripheralCharacteristics.removeValue(forKey: peripheral)
+                    // Log fragment sends specifically
+                    if packet.type == MessageType.fragmentStart.rawValue ||
+                       packet.type == MessageType.fragmentContinue.rawValue ||
+                       packet.type == MessageType.fragmentEnd.rawValue {
+                        let fragmentType = packet.type == MessageType.fragmentStart.rawValue ? "START" :
+                                         (packet.type == MessageType.fragmentContinue.rawValue ? "CONTINUE" : "END")
+                        SecurityLogger.log("      ✅ Sent \(fragmentType) fragment to peripheral \(peerID)", 
+                                         category: SecurityLogger.noise, level: .info)
                     }
                 }
+            } else {
+                // No characteristic found for this peripheral
+                SecurityLogger.log("      ⚠️ No characteristic found for peripheral \(peerID)", 
+                                 category: SecurityLogger.noise, level: .debug)
+                connectedPeripherals.removeValue(forKey: peerID)
             }
         }
         
         // Send to subscribed centrals (as peripheral)
         var sentToCentrals = 0
+        SecurityLogger.log("   📤 Broadcasting to \(subscribedCentrals.count) subscribed centrals", 
+                         category: SecurityLogger.noise, level: .debug)
+        
         if let char = characteristic, !subscribedCentrals.isEmpty {
             // Send to all subscribed centrals
             // Note: Large packets should already be fragmented by the check at the beginning of broadcastPacket
@@ -1648,6 +1716,9 @@ class BluetoothMeshService: NSObject {
                 sentToCentrals = subscribedCentrals.count
             }
         }
+        
+        SecurityLogger.log("   📊 Broadcast result: Sent to \(sentToPeripherals) peripherals and \(sentToCentrals) centrals", 
+                         category: SecurityLogger.noise, level: .info)
         
         // If no peers received the message, add to retry queue ONLY if it's our own message
         if sentToPeripherals == 0 && sentToCentrals == 0 {
@@ -1687,10 +1758,20 @@ class BluetoothMeshService: NSObject {
         messageQueue.async(flags: .barrier) { [weak self] in
             guard let self = self else { return }
             
-            
-            // Log specific Noise packet types
+            SecurityLogger.log("📨 RECEIVE DEBUG: Processing received packet", 
+                             category: SecurityLogger.noise, level: .debug)
+            SecurityLogger.log("   From peer: \(peerID)", 
+                             category: SecurityLogger.noise, level: .debug)
+            SecurityLogger.log("   Type: \(MessageType(rawValue: packet.type)?.description ?? "Unknown") (\(packet.type))", 
+                             category: SecurityLogger.noise, level: .debug)
+            SecurityLogger.log("   TTL: \(packet.ttl)", 
+                             category: SecurityLogger.noise, level: .debug)
+            SecurityLogger.log("   Payload size: \(packet.payload.count) bytes", 
+                             category: SecurityLogger.noise, level: .debug)
             
             guard packet.ttl > 0 else { 
+                SecurityLogger.log("   ❌ Dropping packet: TTL exhausted", 
+                                 category: SecurityLogger.noise, level: .debug)
                 return 
             }
             
@@ -1728,9 +1809,13 @@ class BluetoothMeshService: NSObject {
         if messageBloomFilter.contains(messageID) {
             // Also check exact set for accuracy (bloom filter can have false positives)
             if processedMessages.contains(messageID) {
+                SecurityLogger.log("   ❌ Dropping packet: Duplicate message (ID: \(messageID))", 
+                                 category: SecurityLogger.noise, level: .debug)
                 return
             } else {
                 // False positive from Bloom filter
+                SecurityLogger.log("   ⚠️ Bloom filter false positive for ID: \(messageID)", 
+                                 category: SecurityLogger.noise, level: .debug)
             }
         }
         
@@ -1846,12 +1931,28 @@ class BluetoothMeshService: NSObject {
                                          Double.random(in: 0...1) < relayProb
                         
                         if shouldRelay {
+                            SecurityLogger.log("   🔄 RELAY: Will relay broadcast message", 
+                                             category: SecurityLogger.noise, level: .debug)
+                            SecurityLogger.log("      TTL: \(packet.ttl) → \(relayPacket.ttl)", 
+                                             category: SecurityLogger.noise, level: .debug)
+                            SecurityLogger.log("      Relay probability: \(relayProb)", 
+                                             category: SecurityLogger.noise, level: .debug)
+                            
                             // Add random delay to prevent collision storms
                             let delay = Double.random(in: minMessageDelay...maxMessageDelay)
+                            SecurityLogger.log("      Delay: \(delay)s", 
+                                             category: SecurityLogger.noise, level: .debug)
+                            
                             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                                 self?.broadcastPacket(relayPacket)
                             }
+                        } else {
+                            SecurityLogger.log("   ⏭️ RELAY: Skipping relay (probability check failed)", 
+                                             category: SecurityLogger.noise, level: .debug)
                         }
+                    } else {
+                        SecurityLogger.log("   ⏹️ RELAY: Not relaying (TTL exhausted)", 
+                                         category: SecurityLogger.noise, level: .debug)
                     }
                     
                 } else if isPeerIDOurs(recipientID.hexEncodedString()) {
@@ -2193,11 +2294,20 @@ class BluetoothMeshService: NSObject {
                 }
             
         case .fragmentStart, .fragmentContinue, .fragmentEnd:
-            // let fragmentTypeStr = packet.type == MessageType.fragmentStart.rawValue ? "START" : 
-            //                    (packet.type == MessageType.fragmentContinue.rawValue ? "CONTINUE" : "END")
+            let fragmentTypeStr = packet.type == MessageType.fragmentStart.rawValue ? "START" : 
+                               (packet.type == MessageType.fragmentContinue.rawValue ? "CONTINUE" : "END")
+            
+            SecurityLogger.log("📦 FRAGMENT PACKET: Received \(fragmentTypeStr) fragment", 
+                             category: SecurityLogger.noise, level: .info)
+            SecurityLogger.log("   From: \(packet.senderID.hexEncodedString())", 
+                             category: SecurityLogger.noise, level: .info)
+            SecurityLogger.log("   TTL: \(packet.ttl)", 
+                             category: SecurityLogger.noise, level: .info)
             
             // Validate fragment has minimum required size
             if packet.payload.count < 13 {
+                SecurityLogger.log("   🔴 Fragment too small: \(packet.payload.count) bytes", 
+                                 category: SecurityLogger.noise, level: .error)
                 return
             }
             
@@ -2207,7 +2317,12 @@ class BluetoothMeshService: NSObject {
             var relayPacket = packet
             relayPacket.ttl -= 1
             if relayPacket.ttl > 0 {
+                SecurityLogger.log("   🔄 Relaying fragment with TTL: \(relayPacket.ttl)", 
+                                 category: SecurityLogger.noise, level: .info)
                 self.broadcastPacket(relayPacket)
+            } else {
+                SecurityLogger.log("   ⏹️ Not relaying fragment (TTL exhausted)", 
+                                 category: SecurityLogger.noise, level: .info)
             }
             
         case .channelAnnounce:
@@ -2491,7 +2606,11 @@ class BluetoothMeshService: NSObject {
     }
     
     private func sendFragmentedPacket(_ packet: BitchatPacket) {
-        guard let fullData = packet.toBinaryData() else { return }
+        guard let fullData = packet.toBinaryData() else { 
+            SecurityLogger.log("🔴 FRAGMENT DEBUG: Failed to convert packet to binary data", 
+                             category: SecurityLogger.noise, level: .error)
+            return 
+        }
         
         // Generate a fixed 8-byte fragment ID
         var fragmentID = Data(count: 8)
@@ -2503,11 +2622,30 @@ class BluetoothMeshService: NSObject {
             fullData[offset..<min(offset + maxFragmentSize, fullData.count)]
         }
         
-        // Splitting into fragments
+        // Debug: Log fragmentation details
+        let fragmentIDHex = fragmentID.hexEncodedString()
+        SecurityLogger.log("📤 FRAGMENT DEBUG: Starting fragmentation", 
+                         category: SecurityLogger.noise, level: .info)
+        SecurityLogger.log("   Fragment ID: \(fragmentIDHex)", 
+                         category: SecurityLogger.noise, level: .info)
+        SecurityLogger.log("   Original packet type: \(MessageType(rawValue: packet.type)?.description ?? "Unknown")", 
+                         category: SecurityLogger.noise, level: .info)
+        SecurityLogger.log("   Original data size: \(fullData.count) bytes", 
+                         category: SecurityLogger.noise, level: .info)
+        SecurityLogger.log("   Number of fragments: \(fragments.count)", 
+                         category: SecurityLogger.noise, level: .info)
+        SecurityLogger.log("   Fragment size: \(maxFragmentSize) bytes", 
+                         category: SecurityLogger.noise, level: .info)
+        SecurityLogger.log("   Sender ID: \(packet.senderID.hexEncodedString())", 
+                         category: SecurityLogger.noise, level: .info)
+        if let recipientID = packet.recipientID {
+            SecurityLogger.log("   Recipient ID: \(recipientID.hexEncodedString())", 
+                             category: SecurityLogger.noise, level: .info)
+        }
         
-        // Optimize fragment transmission for speed
-        // Use minimal delay for BLE 5.0 which supports better throughput
-        let delayBetweenFragments: TimeInterval = 0.02  // 20ms between fragments for faster transmission
+        // Optimize fragment transmission for reliability
+        // Increase delay to ensure BLE can handle the transmission properly
+        let delayBetweenFragments: TimeInterval = 0.1  // 100ms between fragments for better reliability
         
         for (index, fragmentData) in fragments.enumerated() {
             var fragmentPayload = Data()
@@ -2543,19 +2681,47 @@ class BluetoothMeshService: NSObject {
             // Send fragments with linear delay
             let totalDelay = Double(index) * delayBetweenFragments
             
+            // Debug: Log each fragment being sent
+            SecurityLogger.log("   📦 Fragment \(index)/\(fragments.count - 1): Type=\(fragmentType), Size=\(fragmentData.count) bytes, Delay=\(totalDelay)s", 
+                             category: SecurityLogger.noise, level: .debug)
+            
             // Send fragments on background queue with calculated delay
             messageQueue.asyncAfter(deadline: .now() + totalDelay) { [weak self] in
+                SecurityLogger.log("   ✈️ FRAGMENT SEND: Sending fragment \(index) of \(fragmentIDHex)", 
+                                 category: SecurityLogger.noise, level: .info)
+                SecurityLogger.log("      Fragment type: \(fragmentType)", 
+                                 category: SecurityLogger.noise, level: .info)
+                SecurityLogger.log("      Fragment payload size: \(fragmentPayload.count) bytes", 
+                                 category: SecurityLogger.noise, level: .info)
+                SecurityLogger.log("      Original packet type: \(MessageType(rawValue: packet.type)?.description ?? "Unknown")", 
+                                 category: SecurityLogger.noise, level: .info)
                 self?.broadcastPacket(fragmentPacket)
             }
         }
         
-        let _ = Double(fragments.count - 1) * delayBetweenFragments
+        let totalTransmissionTime = Double(fragments.count - 1) * delayBetweenFragments
+        SecurityLogger.log("📤 FRAGMENT DEBUG: All fragments scheduled, total transmission time: \(totalTransmissionTime)s", 
+                         category: SecurityLogger.noise, level: .info)
+        
+        // Log fragment sizes for debugging
+        for (index, fragment) in fragments.enumerated() {
+            SecurityLogger.log("   Fragment \(index) size: \(fragment.count) bytes", 
+                             category: SecurityLogger.noise, level: .info)
+        }
     }
     
     private func handleFragment(_ packet: BitchatPacket, from peerID: String) {
-        // Handling fragment
+        // Debug: Log fragment reception
+        let fragmentTypeStr = packet.type == MessageType.fragmentStart.rawValue ? "START" : 
+                           (packet.type == MessageType.fragmentContinue.rawValue ? "CONTINUE" : "END")
+        SecurityLogger.log("📥 FRAGMENT DEBUG: Received \(fragmentTypeStr) fragment from \(peerID)", 
+                         category: SecurityLogger.noise, level: .info)
+        SecurityLogger.log("   Payload size: \(packet.payload.count) bytes", 
+                         category: SecurityLogger.noise, level: .debug)
         
         guard packet.payload.count >= 13 else { 
+            SecurityLogger.log("🔴 FRAGMENT DEBUG: Fragment too small, expected at least 13 bytes, got \(packet.payload.count)", 
+                             category: SecurityLogger.noise, level: .error)
             return 
         }
         
@@ -2565,6 +2731,7 @@ class BluetoothMeshService: NSObject {
         
         // Extract fragment ID as binary data (8 bytes)
         guard payloadArray.count >= 8 else {
+            SecurityLogger.log("🔴 FRAGMENT DEBUG: Not enough data for fragment ID")
             return
         }
         
@@ -2574,7 +2741,7 @@ class BluetoothMeshService: NSObject {
         
         // Safely extract index
         guard payloadArray.count >= offset + 2 else { 
-            // Not enough data for index
+            SecurityLogger.log("🔴 FRAGMENT DEBUG: Not enough data for index")
             return 
         }
         let index = Int(payloadArray[offset]) << 8 | Int(payloadArray[offset + 1])
@@ -2582,7 +2749,7 @@ class BluetoothMeshService: NSObject {
         
         // Safely extract total
         guard payloadArray.count >= offset + 2 else { 
-            // Not enough data for total
+            SecurityLogger.log("🔴 FRAGMENT DEBUG: Not enough data for total fragments count")
             return 
         }
         let total = Int(payloadArray[offset]) << 8 | Int(payloadArray[offset + 1])
@@ -2590,7 +2757,7 @@ class BluetoothMeshService: NSObject {
         
         // Safely extract original type
         guard payloadArray.count >= offset + 1 else { 
-            // Not enough data for type
+            SecurityLogger.log("🔴 FRAGMENT DEBUG: Not enough data for original message type")
             return 
         }
         let originalType = payloadArray[offset]
@@ -2604,26 +2771,37 @@ class BluetoothMeshService: NSObject {
             fragmentData = Data()
         }
         
+        // Debug: Log fragment details
+        SecurityLogger.log("   Fragment ID: \(fragmentID)", category: SecurityLogger.noise, level: .debug)
+        SecurityLogger.log("   Fragment index: \(index) of \(total)", category: SecurityLogger.noise, level: .debug)
+        SecurityLogger.log("   Original message type: \(MessageType(rawValue: originalType)?.description ?? "Unknown")", category: SecurityLogger.noise, level: .debug)
+        SecurityLogger.log("   Fragment data size: \(fragmentData.count) bytes", category: SecurityLogger.noise, level: .debug)
         
         // Initialize fragment collection if needed
         if incomingFragments[fragmentID] == nil {
             // Check if we've reached the concurrent session limit
             if incomingFragments.count >= maxConcurrentFragmentSessions {
+                SecurityLogger.log("⚠️ FRAGMENT DEBUG: Reached max concurrent sessions (\(maxConcurrentFragmentSessions)), cleaning up old fragments", category: SecurityLogger.noise, level: .warning)
                 // Clean up oldest fragments first
                 cleanupOldFragments()
                 
                 // If still at limit, reject new session to prevent DoS
                 if incomingFragments.count >= maxConcurrentFragmentSessions {
+                    SecurityLogger.log("🔴 FRAGMENT DEBUG: Still at max sessions after cleanup, rejecting new fragment session")
                     return
                 }
             }
             
+            SecurityLogger.log("🆕 FRAGMENT DEBUG: Starting new fragment session for ID: \(fragmentID)", category: SecurityLogger.noise, level: .info)
             incomingFragments[fragmentID] = [:]
             fragmentMetadata[fragmentID] = (originalType, total, Date())
         }
         
         incomingFragments[fragmentID]?[index] = fragmentData
         
+        // Debug: Log fragment storage
+        let storedCount = incomingFragments[fragmentID]?.count ?? 0
+        SecurityLogger.log("   💾 Stored fragment \(index) (total stored: \(storedCount) of \(total))", category: SecurityLogger.noise, level: .debug)
         
         // Check if we have all fragments
         if let fragments = incomingFragments[fragmentID],
@@ -2631,14 +2809,18 @@ class BluetoothMeshService: NSObject {
             
             // Check if we have all fragments by verifying each index exists
             var hasAllFragments = true
+            var missingIndices: [Int] = []
             for i in 0..<metadata.totalFragments {
                 if fragments[i] == nil {
                     hasAllFragments = false
-                    break
+                    missingIndices.append(i)
                 }
             }
             
             if hasAllFragments {
+                SecurityLogger.log("✅ FRAGMENT DEBUG: All fragments received for ID: \(fragmentID)", category: SecurityLogger.noise, level: .info)
+                SecurityLogger.log("   Starting reassembly of \(metadata.totalFragments) fragments", category: SecurityLogger.noise, level: .info)
+                
                 // Reassemble the original packet
                 var reassembledData = Data()
                 for i in 0..<metadata.totalFragments {
@@ -2646,21 +2828,45 @@ class BluetoothMeshService: NSObject {
                         reassembledData.append(fragment)
                     } else {
                         // This shouldn't happen as we just checked
+                        SecurityLogger.log("🔴 FRAGMENT DEBUG: Unexpected missing fragment \(i) during reassembly")
                         return
                     }
                 }
                 
-                // Successfully reassembled fragments
+                SecurityLogger.log("   📦 Reassembled data size: \(reassembledData.count) bytes", 
+                                 category: SecurityLogger.noise, level: .info)
                 
-                // Parse and handle the reassembled packet
-                if let reassembledPacket = BitchatPacket.from(reassembledData) {
+                // The reassembled data is already a complete encoded packet (it was fragmented AFTER encoding)
+                // We should NOT decode it again - just parse it directly from the binary format
+                if let reassembledPacket = BinaryProtocol.decode(reassembledData) {
+                    SecurityLogger.log("✅ FRAGMENT DEBUG: Successfully parsed reassembled packet", category: SecurityLogger.noise, level: .info)
+                    SecurityLogger.log("   Message type: \(MessageType(rawValue: reassembledPacket.type)?.description ?? "Unknown")", 
+                                     category: SecurityLogger.noise, level: .info)
+                    
                     // Clean up
                     incomingFragments.removeValue(forKey: fragmentID)
                     fragmentMetadata.removeValue(forKey: fragmentID)
                     
                     // Handle the reassembled packet
                     handleReceivedPacket(reassembledPacket, from: peerID, peripheral: nil)
+                } else {
+                    SecurityLogger.log("🔴 FRAGMENT DEBUG: Failed to parse reassembled packet from \(reassembledData.count) bytes", 
+                                     category: SecurityLogger.noise, level: .error)
+                    // Log first few bytes for debugging
+                    let preview = reassembledData.prefix(20).map { String(format: "%02x", $0) }.joined(separator: " ")
+                    SecurityLogger.log("   First 20 bytes: \(preview)", 
+                                     category: SecurityLogger.noise, level: .debug)
+                    // Also check if this looks like it might be double-encoded
+                    if reassembledData.count > 13 {
+                        let version = reassembledData[0]
+                        let type = reassembledData[1]
+                        let ttl = reassembledData[2]
+                        SecurityLogger.log("   Packet header: version=\(version), type=\(type), ttl=\(ttl)", 
+                                         category: SecurityLogger.noise, level: .debug)
+                    }
                 }
+            } else {
+                SecurityLogger.log("   ⏳ Still waiting for fragments: missing indices \(missingIndices)", category: SecurityLogger.noise, level: .debug)
             }
         }
         
@@ -2679,9 +2885,15 @@ class BluetoothMeshService: NSObject {
         }
         
         // Remove expired fragments
-        for fragID in fragmentsToRemove {
-            incomingFragments.removeValue(forKey: fragID)
-            fragmentMetadata.removeValue(forKey: fragID)
+        if !fragmentsToRemove.isEmpty {
+            SecurityLogger.log("🧹 FRAGMENT DEBUG: Cleaning up \(fragmentsToRemove.count) expired fragment sessions", category: SecurityLogger.noise, level: .info)
+            for fragID in fragmentsToRemove {
+                if let fragments = incomingFragments[fragID] {
+                    SecurityLogger.log("   Removing fragment ID: \(fragID) with \(fragments.count) fragments", category: SecurityLogger.noise, level: .debug)
+                }
+                incomingFragments.removeValue(forKey: fragID)
+                fragmentMetadata.removeValue(forKey: fragID)
+            }
         }
         
         // Also enforce memory bounds - if we have too many fragment bytes, remove oldest
@@ -3514,6 +3726,13 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
     private func handleNoiseEncryptedMessage(from peerID: String, encryptedData: Data, originalPacket: BitchatPacket) {
         // Use noiseService directly
         
+        SecurityLogger.log("🔐 NOISE DEBUG: Processing encrypted message", 
+                         category: SecurityLogger.noise, level: .info)
+        SecurityLogger.log("   From peer: \(peerID)", 
+                         category: SecurityLogger.noise, level: .debug)
+        SecurityLogger.log("   Encrypted size: \(encryptedData.count) bytes", 
+                         category: SecurityLogger.noise, level: .debug)
+        
         // For Noise encrypted messages, we need to decrypt first to check the inner packet
         // The outer packet's recipientID might be for routing, not the final recipient
         
@@ -3531,6 +3750,8 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
         }
         
         if alreadyProcessed {
+            SecurityLogger.log("   ❌ Already processed this encrypted message", 
+                             category: SecurityLogger.noise, level: .debug)
             return
         }
         
@@ -3538,17 +3759,27 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
             // Decrypt the message
             let decryptedData = try noiseService.decrypt(encryptedData, from: peerID)
             
+            SecurityLogger.log("   ✅ Decryption successful", 
+                             category: SecurityLogger.noise, level: .info)
+            SecurityLogger.log("   Decrypted size: \(decryptedData.count) bytes", 
+                             category: SecurityLogger.noise, level: .debug)
+            
             // Check if this is a special format message (type marker + payload)
             if decryptedData.count > 1 {
                 let typeMarker = decryptedData[0]
                 
                 // Check if this is a delivery ACK with the new format
                 if typeMarker == MessageType.deliveryAck.rawValue {
+                    SecurityLogger.log("   📬 Contains delivery ACK", 
+                                     category: SecurityLogger.noise, level: .debug)
+                    
                     // Extract the ACK JSON data (skip the type marker)
                     let ackData = decryptedData.dropFirst()
                     
                     // Decode the delivery ACK
                     if let ack = DeliveryAck.decode(from: ackData) {
+                        SecurityLogger.log("   ✅ Decoded delivery ACK for message: \(ack.originalMessageID)", 
+                                         category: SecurityLogger.noise, level: .debug)
                         
                         // Process the ACK
                         DeliveryTracker.shared.processDeliveryAck(ack)
@@ -3564,6 +3795,10 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
             
             // Try to parse as a full inner packet (for backward compatibility and other message types)
             if let innerPacket = BitchatPacket.from(decryptedData) {
+                SecurityLogger.log("   📦 Contains inner packet", 
+                                 category: SecurityLogger.noise, level: .debug)
+                SecurityLogger.log("   Inner type: \(MessageType(rawValue: innerPacket.type)?.description ?? "Unknown")", 
+                                 category: SecurityLogger.noise, level: .debug)
                 
                 // Process the decrypted inner packet
                 // The packet will be handled according to its recipient ID
@@ -3571,8 +3806,13 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
                 handleReceivedPacket(innerPacket, from: peerID)
             }
         } catch {
+            SecurityLogger.log("   🔴 Decryption failed: \(error)", 
+                             category: SecurityLogger.noise, level: .error)
+            
             // Failed to decrypt - might need to re-establish session
             if !noiseService.hasEstablishedSession(with: peerID) {
+                SecurityLogger.log("   🔄 Initiating new handshake with \(peerID)", 
+                                 category: SecurityLogger.noise, level: .info)
                 initiateNoiseHandshake(with: peerID)
             }
         }

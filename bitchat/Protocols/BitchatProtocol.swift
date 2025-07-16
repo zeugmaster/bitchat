@@ -16,13 +16,22 @@ struct MessagePadding {
     
     // Add PKCS#7-style padding to reach target size
     static func pad(_ data: Data, toSize targetSize: Int) -> Data {
-        guard data.count < targetSize else { return data }
+        guard data.count < targetSize else { 
+            // Debug log when data is already at or above target size
+            if data.count == 243 {
+                print("⚠️ PADDING DEBUG: Data size 243 >= target \(targetSize), not padding")
+            }
+            return data 
+        }
         
         let paddingNeeded = targetSize - data.count
         
         // PKCS#7 only supports padding up to 255 bytes
         // If we need more padding than that, don't pad - return original data
-        guard paddingNeeded <= 255 else { return data }
+        guard paddingNeeded <= 255 else { 
+            print("⚠️ PADDING DEBUG: Padding needed \(paddingNeeded) > 255, not padding")
+            return data 
+        }
         
         var padded = data
         
@@ -41,17 +50,39 @@ struct MessagePadding {
         
         // Last byte tells us how much padding to remove
         let paddingLength = Int(data[data.count - 1])
-        guard paddingLength > 0 && paddingLength <= data.count else { 
-            // Debug logging for 243-byte packets
-            if data.count == 243 {
+        
+        // Debug large packets
+        if data.count > 512 {
+            print("🔍 UNPAD DEBUG: Data size \(data.count), last byte value: \(paddingLength)")
+        }
+        
+        guard paddingLength > 0 && paddingLength <= data.count && paddingLength <= 255 else { 
+            // If padding length is invalid, return original data
+            if data.count > 512 {
+                print("   ⚠️ Invalid padding length \(paddingLength), returning original data")
             }
             return data 
         }
         
+        // Additional validation: check if this looks like valid PKCS#7 padding
+        // All padding bytes should have the same value
+        if paddingLength > 1 {
+            let paddingStart = data.count - paddingLength
+            for i in paddingStart..<(data.count - 1) {
+                if data[i] != data[data.count - 1] {
+                    // Not valid PKCS#7 padding
+                    if data.count > 512 {
+                        print("   ⚠️ Invalid PKCS#7 padding pattern, returning original data")
+                    }
+                    return data
+                }
+            }
+        }
+        
         let result = data.prefix(data.count - paddingLength)
         
-        // Debug logging for 243-byte packets
-        if data.count == 243 {
+        if data.count > 512 {
+            print("   ✅ Removed \(paddingLength) bytes of padding, result: \(result.count) bytes")
         }
         
         return result
@@ -59,18 +90,22 @@ struct MessagePadding {
     
     // Find optimal block size for data
     static func optimalBlockSize(for dataSize: Int) -> Int {
-        // Account for encryption overhead (~16 bytes for AES-GCM tag)
-        let totalSize = dataSize + 16
+        // Don't add encryption overhead - the data size already includes everything
+        // Just find the smallest block that fits the actual data
         
         // Find smallest block that fits
         for blockSize in blockSizes {
-            if totalSize <= blockSize {
-                return blockSize
+            if dataSize <= blockSize {
+                // Check if padding would exceed PKCS#7 limit (255 bytes)
+                let paddingNeeded = blockSize - dataSize
+                if paddingNeeded <= 255 {
+                    return blockSize
+                }
             }
         }
         
-        // For very large messages, just use the original size
-        // (will be fragmented anyway)
+        // For very large messages or when padding would exceed 255 bytes,
+        // just use the original size (will be fragmented anyway)
         return dataSize
     }
 }
