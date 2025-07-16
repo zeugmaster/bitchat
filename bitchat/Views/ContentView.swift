@@ -121,8 +121,13 @@ struct ContentView: View {
         .sheet(isPresented: $showAppInfo) {
             AppInfoView()
         }
-        .sheet(isPresented: $showWallet) {
-            WalletView()
+        .sheet(isPresented: Binding(
+            get: { viewModel.showingFingerprintFor != nil },
+            set: { _ in viewModel.showingFingerprintFor = nil }
+        )) {
+            if let peerID = viewModel.showingFingerprintFor {
+                FingerprintView(viewModel: viewModel, peerID: peerID)
+            }
         }
         .alert("Set Channel Password", isPresented: $showPasswordInput) {
             SecureField("Password", text: $passwordInput)
@@ -192,16 +197,27 @@ struct ContentView: View {
                 
                 Spacer()
                 
-                HStack(spacing: 6) {
-                    Image(systemName: "lock.fill")
-                        .font(.system(size: 14))
-                        .foregroundColor(Color.orange)
-                        .accessibilityLabel("Private chat with \(privatePeerNick)")
-                    Text("\(privatePeerNick)")
-                        .font(.system(size: 16, weight: .medium, design: .monospaced))
-                        .foregroundColor(Color.orange)
+                Button(action: {
+                    viewModel.showFingerprint(for: privatePeerID)
+                }) {
+                    HStack(spacing: 6) {
+                        // Dynamic encryption status icon
+                        let encryptionStatus = viewModel.getEncryptionStatus(for: privatePeerID)
+                        Image(systemName: encryptionStatus.icon)
+                            .font(.system(size: 14))
+                            .foregroundColor(encryptionStatus == .noiseVerified ? Color.green : 
+                                           encryptionStatus == .noiseSecured ? Color.orange :
+                                           Color.red)
+                            .accessibilityLabel("Encryption status: \(encryptionStatus == .noiseVerified ? "verified" : encryptionStatus == .noiseSecured ? "secured" : "not encrypted")")
+                        Text("\(privatePeerNick)")
+                            .font(.system(size: 16, weight: .medium, design: .monospaced))
+                            .foregroundColor(Color.orange)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .accessibilityLabel("Private chat with \(privatePeerNick)")
+                    .accessibilityHint("Tap to view encryption fingerprint")
                 }
-                .frame(maxWidth: .infinity)
+                .buttonStyle(.plain)
                 
                 Spacer()
                 
@@ -240,16 +256,42 @@ struct ContentView: View {
                         sidebarDragOffset = 0
                     }
                 }) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 4) {
                         if viewModel.passwordProtectedChannels.contains(currentChannel) {
                             Image(systemName: "lock.fill")
                                 .font(.system(size: 14))
                                 .foregroundColor(Color.orange)
                                 .accessibilityLabel("Password protected channel")
                         }
-                        Text("channel: \(currentChannel)")
+                        
+                        Text(currentChannel)
                             .font(.system(size: 16, weight: .medium, design: .monospaced))
                             .foregroundColor(viewModel.passwordProtectedChannels.contains(currentChannel) ? Color.orange : Color.blue)
+                        
+                        // Verification status indicator after channel name
+                        if viewModel.passwordProtectedChannels.contains(currentChannel),
+                           let status = viewModel.channelVerificationStatus[currentChannel] {
+                            switch status {
+                            case .verifying:
+                                ProgressView()
+                                    .scaleEffect(0.5)
+                                    .frame(width: 12, height: 12)
+                            case .verified:
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(Color.green)
+                            case .failed:
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(Color.red)
+                            case .unverified:
+                                Image(systemName: "questionmark.circle")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(Color.gray)
+                                    .help("Password verification pending")
+                            }
+                        } else if viewModel.passwordProtectedChannels.contains(currentChannel) {
+                        }
                     }
                 }
                 .buttonStyle(.plain)
@@ -268,7 +310,7 @@ struct ContentView: View {
                     }
                     
                     // Save button - only for channel owner
-                    if viewModel.channelCreators[currentChannel] == viewModel.meshService.myPeerID {
+                    if viewModel.isChannelOwner(currentChannel) {
                         Button(action: {
                             viewModel.sendMessage("/save")
                         }) {
@@ -282,7 +324,7 @@ struct ContentView: View {
                     }
                     
                     // Password button for channel creator only
-                    if viewModel.channelCreators[currentChannel] == viewModel.meshService.myPeerID {
+                    if viewModel.isChannelOwner(currentChannel) {
                         Button(action: {
                             // Toggle password protection
                             if viewModel.passwordProtectedChannels.contains(currentChannel) {
@@ -305,9 +347,9 @@ struct ContentView: View {
                     Button(action: {
                         showLeaveChannelAlert = true
                     }) {
-                        Text("leave")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(Color.red)
+                        Image(systemName: "xmark.circle")
+                            .font(.system(size: 16))
+                            .foregroundColor(Color.red.opacity(0.8))
                     }
                     .buttonStyle(.plain)
                     .alert("leave channel?", isPresented: $showLeaveChannelAlert) {
@@ -428,21 +470,66 @@ struct ContentView: View {
                     let messages: [BitchatMessage] = {
                         if let privatePeer = viewModel.selectedPrivateChatPeer {
                             let msgs = viewModel.getPrivateChatMessages(for: privatePeer)
-                            // Log what we're showing
-                            // Removed debug logging
                             return msgs
                         } else if let currentChannel = viewModel.currentChannel {
-                            return viewModel.getChannelMessages(currentChannel)
+                            let msgs = viewModel.getChannelMessages(currentChannel)
+                            return msgs
                         } else {
                             return viewModel.messages
                         }
                     }()
                     
                     ForEach(messages, id: \.id) { message in
-                        MessageView(message: message, viewModel: viewModel, colorScheme: colorScheme)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 2)
-                            .id(message.id)
+                        VStack(alignment: .leading, spacing: 4) {
+                            // Check if current user is mentioned
+                            let _ = message.mentions?.contains(viewModel.nickname) ?? false
+                            
+                            if message.sender == "system" {
+                                // System messages
+                                Text(viewModel.formatMessageAsText(message, colorScheme: colorScheme))
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                // Regular messages with natural text wrapping
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack(alignment: .top, spacing: 0) {
+                                        // Single text view for natural wrapping
+                                        Text(viewModel.formatMessageAsText(message, colorScheme: colorScheme))
+                                            .textSelection(.enabled)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        
+                                        // Delivery status indicator for private messages
+                                        if message.isPrivate && message.sender == viewModel.nickname,
+                                           let status = message.deliveryStatus {
+                                            DeliveryStatusView(status: status, colorScheme: colorScheme)
+                                                .padding(.leading, 4)
+                                        }
+                                    }
+                                    
+                                    // Check for links and show preview
+                                    if let markdownLink = message.content.extractMarkdownLink() {
+                                        // Don't show link preview if the message is just the emoji
+                                        let cleanContent = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        if cleanContent.hasPrefix("👇") {
+                                            LinkPreviewView(url: markdownLink.url, title: markdownLink.title)
+                                                .padding(.top, 4)
+                                        }
+                                    } else {
+                                        // Check for plain URLs
+                                        let urls = message.content.extractURLs()
+                                        ForEach(urls.prefix(3), id: \.url) { urlInfo in
+                                            LinkPreviewView(url: urlInfo.url, title: nil)
+                                                .padding(.top, 4)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 2)
+                        .id(message.id)
                     }
                 }
                 .padding(.vertical, 8)
@@ -794,7 +881,7 @@ struct ContentView: View {
     private func channelControls(for channel: String) -> some View {
         HStack(spacing: 4) {
             // Password button for channel creator only
-            if viewModel.channelCreators[channel] == viewModel.meshService.myPeerID {
+            if viewModel.isChannelOwner(channel) {
                 Button(action: {
                     // Toggle password protection
                     if viewModel.passwordProtectedChannels.contains(channel) {
@@ -826,15 +913,9 @@ struct ContentView: View {
             Button(action: {
                 showLeaveChannelAlert = true
             }) {
-                Text("leave channel")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(secondaryTextColor)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 2)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(secondaryTextColor.opacity(0.5), lineWidth: 1)
-                    )
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(Color.red.opacity(0.6))
             }
             .buttonStyle(.plain)
             .alert("leave channel", isPresented: $showLeaveChannelAlert) {
@@ -947,13 +1028,13 @@ struct ContentView: View {
                                 return isFav1 // Favorites come first
                             }
                             
-                            let name1 = peerNicknames[peer1] ?? "person-\(peer1.prefix(4))"
-                            let name2 = peerNicknames[peer2] ?? "person-\(peer2.prefix(4))"
+                            let name1 = peerNicknames[peer1] ?? "anon\(peer1.prefix(4))"
+                            let name2 = peerNicknames[peer2] ?? "anon\(peer2.prefix(4))"
                             return name1 < name2
                         }
                         
                         ForEach(sortedPeers, id: \.self) { peerID in
-                            let displayName = peerID == myPeerID ? viewModel.nickname : (peerNicknames[peerID] ?? "person-\(peerID.prefix(4))")
+                            let displayName = peerID == myPeerID ? viewModel.nickname : (peerNicknames[peerID] ?? "anon\(peerID.prefix(4))")
                             let rssi = peerRSSI[peerID]?.intValue ?? -100
                             let isFavorite = viewModel.isFavorite(peerID: peerID)
                             let isMe = peerID == myPeerID
@@ -971,23 +1052,22 @@ struct ContentView: View {
                                         .foregroundColor(Color.orange)
                                         .accessibilityLabel("Unread message from \(displayName)")
                                 } else {
-                                    Circle()
-                                        .fill(viewModel.getRSSIColor(rssi: rssi, colorScheme: colorScheme))
-                                        .frame(width: 8, height: 8)
+                                    Image(systemName: "radiowaves.left")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(viewModel.getRSSIColor(rssi: rssi, colorScheme: colorScheme))
                                         .accessibilityLabel("Signal strength: \(rssi > -60 ? "excellent" : rssi > -70 ? "good" : rssi > -80 ? "fair" : "poor")")
                                 }
                                 
-                                // Favorite star (not for self)
+                                // Encryption status icon (between connection dot and name)
                                 if !isMe {
-                                    Button(action: {
-                                        viewModel.toggleFavorite(peerID: peerID)
-                                    }) {
-                                        Image(systemName: isFavorite ? "star.fill" : "star")
-                                            .font(.system(size: 12))
-                                            .foregroundColor(isFavorite ? Color.yellow : secondaryTextColor)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel(isFavorite ? "Remove \(displayName) from favorites" : "Add \(displayName) to favorites")
+                                    let encryptionStatus = viewModel.getEncryptionStatus(for: peerID)
+                                    Image(systemName: encryptionStatus.icon)
+                                        .font(.system(size: 10))
+                                        .foregroundColor(encryptionStatus == .noiseVerified ? Color.green : 
+                                                       encryptionStatus == .noiseSecured ? textColor :
+                                                       encryptionStatus == .noiseHandshaking ? Color.orange :
+                                                       Color.red)
+                                        .accessibilityLabel("Encryption: \(encryptionStatus == .noiseVerified ? "verified" : encryptionStatus == .noiseSecured ? "secured" : encryptionStatus == .noiseHandshaking ? "establishing" : "none")")
                                 }
                                 
                                 // Peer name
@@ -1009,16 +1089,29 @@ struct ContentView: View {
                                             }
                                         }
                                     }) {
-                                        HStack {
-                                            Text(displayName)
-                                                .font(.system(size: 14, design: .monospaced))
-                                                .foregroundColor(peerNicknames[peerID] != nil ? textColor : secondaryTextColor)
-                                            
-                                            Spacer()
-                                        }
+                                        Text(displayName)
+                                            .font(.system(size: 14, design: .monospaced))
+                                            .foregroundColor(peerNicknames[peerID] != nil ? textColor : secondaryTextColor)
                                     }
                                     .buttonStyle(.plain)
                                     .disabled(peerNicknames[peerID] == nil)
+                                    .onTapGesture(count: 2) {
+                                        // Show fingerprint on double tap
+                                        viewModel.showFingerprint(for: peerID)
+                                    }
+                                    
+                                    Spacer()
+                                    
+                                    // Favorite star
+                                    Button(action: {
+                                        viewModel.toggleFavorite(peerID: peerID)
+                                    }) {
+                                        Image(systemName: isFavorite ? "star.fill" : "star")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(isFavorite ? Color.yellow : secondaryTextColor)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel(isFavorite ? "Remove \(displayName) from favorites" : "Add \(displayName) to favorites")
                                 }
                             }
                             .padding(.horizontal)
