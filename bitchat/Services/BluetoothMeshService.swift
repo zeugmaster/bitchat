@@ -171,10 +171,10 @@ class BluetoothMeshService: NSObject {
     // Fragment handling with security limits
     private var incomingFragments: [String: [Int: Data]] = [:]  // fragmentID -> [index: data]
     private var fragmentMetadata: [String: (originalType: UInt8, totalFragments: Int, timestamp: Date)] = [:]
-    // Reduced fragment size to ensure packets stay under BLE MTU after adding metadata
+    // Optimized fragment size for better throughput while staying under BLE MTU
     // Fragment metadata adds 13 bytes, plus padding can increase size
-    // Using 200 bytes ensures final packet stays well under 512 bytes
-    private let maxFragmentSize = 200  // Conservative size for BLE compatibility
+    // Using 400 bytes provides good balance between throughput and BLE compatibility
+    private let maxFragmentSize = 400  // Optimized size for better throughput
     private let maxConcurrentFragmentSessions = 50  // Increased limit for better fragment handling
     private let fragmentTimeout: TimeInterval = 60  // 60 seconds timeout for incomplete fragments
     
@@ -2643,9 +2643,9 @@ class BluetoothMeshService: NSObject {
                              category: SecurityLogger.noise, level: .info)
         }
         
-        // Optimize fragment transmission for reliability
-        // Increase delay to ensure BLE can handle the transmission properly
-        let delayBetweenFragments: TimeInterval = 0.1  // 100ms between fragments for better reliability
+        // Optimize fragment transmission for throughput while maintaining reliability
+        // Reduced delay for faster transmission while keeping BLE stability
+        let delayBetweenFragments: TimeInterval = 0.05  // 50ms between fragments for faster throughput
         
         for (index, fragmentData) in fragments.enumerated() {
             var fragmentPayload = Data()
