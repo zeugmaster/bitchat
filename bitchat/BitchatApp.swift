@@ -61,7 +61,8 @@ struct BitchatApp: App {
     
     private func checkForSharedContent() {
         // Check app group for shared content from extension
-        guard let userDefaults = UserDefaults(suiteName: "group.chat.bitchat") else {
+        guard let userDefaults = UserDefaults(suiteName: "group.com.cypherbase.bitchat") else {
+            print("DEBUG: Failed to access app group UserDefaults")
             return
         }
         
@@ -176,3 +177,4 @@ extension String {
         self.isEmpty ? nil : self
     }
 }
+

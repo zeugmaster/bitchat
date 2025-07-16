@@ -171,9 +171,12 @@ class BluetoothMeshService: NSObject {
     // Fragment handling with security limits
     private var incomingFragments: [String: [Int: Data]] = [:]  // fragmentID -> [index: data]
     private var fragmentMetadata: [String: (originalType: UInt8, totalFragments: Int, timestamp: Date)] = [:]
-    private let maxFragmentSize = 500  // Optimized for BLE 5.0 extended data length
-    private let maxConcurrentFragmentSessions = 20  // Limit concurrent fragment sessions to prevent DoS
-    private let fragmentTimeout: TimeInterval = 30  // 30 seconds timeout for incomplete fragments
+    // Optimized fragment size for better throughput while staying under BLE MTU
+    // Fragment metadata adds 13 bytes, plus padding can increase size
+    // Using 400 bytes provides good balance between throughput and BLE compatibility
+    private let maxFragmentSize = 400  // Optimized size for better throughput
+    private let maxConcurrentFragmentSessions = 50  // Increased limit for better fragment handling
+    private let fragmentTimeout: TimeInterval = 60  // 60 seconds timeout for incomplete fragments
     
     var myPeerID: String
     
@@ -769,6 +772,8 @@ class BluetoothMeshService: NSObject {
     func sendMessage(_ content: String, mentions: [String] = [], channel: String? = nil, to recipientID: String? = nil, messageID: String? = nil, timestamp: Date? = nil) {
         // Defensive check for empty content
         guard !content.isEmpty else { return }
+        
+        
         messageQueue.async { [weak self] in
             guard let self = self else { return }
             
@@ -811,24 +816,30 @@ class BluetoothMeshService: NSObject {
                     self.recentlySentMessages.insert(msgID)
                 }
                 
-                if shouldSend {
-                    // Clean up old entries after 10 seconds
-                    self.messageQueue.asyncAfter(deadline: .now() + 10.0) { [weak self] in
-                        guard let self = self else { return }
-                        self.recentlySentMessages.remove(msgID)
-                    }
+                            if shouldSend {
+                // Clean up old entries after 10 seconds
+                self.messageQueue.asyncAfter(deadline: .now() + 10.0) { [weak self] in
+                    guard let self = self else { return }
+                    self.recentlySentMessages.remove(msgID)
+                }
+                
+                // Add random delay before initial send
+                let initialDelay = self.randomDelay()
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + initialDelay) { [weak self] in
+                    self?.broadcastPacket(packet)
+                }
                     
-                    // Add random delay before initial send
-                    let initialDelay = self.randomDelay()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + initialDelay) { [weak self] in
-                        self?.broadcastPacket(packet)
-                    }
-                    
-                    // Single retry for reliability
-                    let retryDelay = 0.3 + self.randomDelay()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay) { [weak self] in
-                        self?.broadcastPacket(packet)
-                        // Re-sending message
+                    // Disable automatic retry for fragmented messages
+                    // The fragmentation system handles its own reliability
+                    // Only retry non-fragmented messages
+                    if let data = packet.toBinaryData(), data.count <= 512 {
+                        // Single retry for reliability (only for small messages)
+                        let retryDelay = 0.3 + self.randomDelay()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay) { [weak self] in
+                            self?.broadcastPacket(packet)
+                            // Re-sending message
+                        }
                     }
                 }
             }
@@ -1606,40 +1617,46 @@ class BluetoothMeshService: NSObject {
         }
         
         // Check if fragmentation is needed for large packets
+        // Note: Fragment packets themselves should never be fragmented
         if data.count > 512 && packet.type != MessageType.fragmentStart.rawValue && 
            packet.type != MessageType.fragmentContinue.rawValue && 
            packet.type != MessageType.fragmentEnd.rawValue {
+
             sendFragmentedPacket(packet)
             return
         }
         
         // Send to connected peripherals (as central)
         var sentToPeripherals = 0
-        for (_, peripheral) in connectedPeripherals {
+        
+        for (peerID, peripheral) in connectedPeripherals {
+            // Double-check connection state to avoid API misuse warnings
+            guard peripheral.state == .connected else {
+                // Remove disconnected peripherals from our tracking
+                connectedPeripherals.removeValue(forKey: peerID)
+                peripheralCharacteristics.removeValue(forKey: peripheral)
+                continue
+            }
+            
             if let characteristic = peripheralCharacteristics[peripheral] {
-                // Check if peripheral is connected before writing
-                if peripheral.state == .connected {
-                    // Use withoutResponse for faster transmission when possible
-                    // Only use withResponse for critical messages or when MTU negotiation needed
-                    let writeType: CBCharacteristicWriteType = data.count > 512 ? .withResponse : .withoutResponse
-                    
-                    // Additional safety check for characteristic properties
-                    if characteristic.properties.contains(.write) || 
-                       characteristic.properties.contains(.writeWithoutResponse) {
-                        peripheral.writeValue(data, for: characteristic, type: writeType)
-                        sentToPeripherals += 1
-                    }
-                } else {
-                    if let peerID = connectedPeripherals.first(where: { $0.value == peripheral })?.key {
-                        connectedPeripherals.removeValue(forKey: peerID)
-                        peripheralCharacteristics.removeValue(forKey: peripheral)
-                    }
+                // Always use withoutResponse for better compatibility and performance
+                // This avoids blocking on write confirmations which can fail for large packets
+                let writeType: CBCharacteristicWriteType = .withoutResponse
+                
+                // Additional safety check for characteristic properties
+                if characteristic.properties.contains(.write) || 
+                   characteristic.properties.contains(.writeWithoutResponse) {
+                    peripheral.writeValue(data, for: characteristic, type: writeType)
+                    sentToPeripherals += 1
                 }
+            } else {
+                connectedPeripherals.removeValue(forKey: peerID)
             }
         }
         
         // Send to subscribed centrals (as peripheral)
         var sentToCentrals = 0
+        
         if let char = characteristic, !subscribedCentrals.isEmpty {
             // Send to all subscribed centrals
             // Note: Large packets should already be fragmented by the check at the beginning of broadcastPacket
@@ -1687,12 +1704,11 @@ class BluetoothMeshService: NSObject {
         messageQueue.async(flags: .barrier) { [weak self] in
             guard let self = self else { return }
             
-            
-            // Log specific Noise packet types
-            
-            guard packet.ttl > 0 else { 
-                return 
-            }
+        
+        
+        guard packet.ttl > 0 else { 
+            return 
+        }
             
             // Validate packet has payload
             guard !packet.payload.isEmpty else {
@@ -1729,8 +1745,6 @@ class BluetoothMeshService: NSObject {
             // Also check exact set for accuracy (bloom filter can have false positives)
             if processedMessages.contains(messageID) {
                 return
-            } else {
-                // False positive from Bloom filter
             }
         }
         
@@ -1848,6 +1862,7 @@ class BluetoothMeshService: NSObject {
                         if shouldRelay {
                             // Add random delay to prevent collision storms
                             let delay = Double.random(in: minMessageDelay...maxMessageDelay)
+                            
                             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                                 self?.broadcastPacket(relayPacket)
                             }
@@ -2193,9 +2208,6 @@ class BluetoothMeshService: NSObject {
                 }
             
         case .fragmentStart, .fragmentContinue, .fragmentEnd:
-            // let fragmentTypeStr = packet.type == MessageType.fragmentStart.rawValue ? "START" : 
-            //                    (packet.type == MessageType.fragmentContinue.rawValue ? "CONTINUE" : "END")
-            
             // Validate fragment has minimum required size
             if packet.payload.count < 13 {
                 return
@@ -2491,7 +2503,11 @@ class BluetoothMeshService: NSObject {
     }
     
     private func sendFragmentedPacket(_ packet: BitchatPacket) {
-        guard let fullData = packet.toBinaryData() else { return }
+        guard let fullData = packet.toBinaryData() else { 
+            SecurityLogger.log("🔴 FRAGMENT DEBUG: Failed to convert packet to binary data", 
+                             category: SecurityLogger.noise, level: .error)
+            return 
+        }
         
         // Generate a fixed 8-byte fragment ID
         var fragmentID = Data(count: 8)
@@ -2503,11 +2519,11 @@ class BluetoothMeshService: NSObject {
             fullData[offset..<min(offset + maxFragmentSize, fullData.count)]
         }
         
-        // Splitting into fragments
+
         
-        // Optimize fragment transmission for speed
-        // Use minimal delay for BLE 5.0 which supports better throughput
-        let delayBetweenFragments: TimeInterval = 0.02  // 20ms between fragments for faster transmission
+        // Optimize fragment transmission for throughput while maintaining reliability
+        // Reduced delay for faster transmission while keeping BLE stability
+        let delayBetweenFragments: TimeInterval = 0.05  // 50ms between fragments for faster throughput
         
         for (index, fragmentData) in fragments.enumerated() {
             var fragmentPayload = Data()
@@ -2548,13 +2564,9 @@ class BluetoothMeshService: NSObject {
                 self?.broadcastPacket(fragmentPacket)
             }
         }
-        
-        let _ = Double(fragments.count - 1) * delayBetweenFragments
     }
     
     private func handleFragment(_ packet: BitchatPacket, from peerID: String) {
-        // Handling fragment
-        
         guard packet.payload.count >= 13 else { 
             return 
         }
@@ -2565,6 +2577,7 @@ class BluetoothMeshService: NSObject {
         
         // Extract fragment ID as binary data (8 bytes)
         guard payloadArray.count >= 8 else {
+            SecurityLogger.log("🔴 FRAGMENT DEBUG: Not enough data for fragment ID")
             return
         }
         
@@ -2574,7 +2587,6 @@ class BluetoothMeshService: NSObject {
         
         // Safely extract index
         guard payloadArray.count >= offset + 2 else { 
-            // Not enough data for index
             return 
         }
         let index = Int(payloadArray[offset]) << 8 | Int(payloadArray[offset + 1])
@@ -2582,7 +2594,6 @@ class BluetoothMeshService: NSObject {
         
         // Safely extract total
         guard payloadArray.count >= offset + 2 else { 
-            // Not enough data for total
             return 
         }
         let total = Int(payloadArray[offset]) << 8 | Int(payloadArray[offset + 1])
@@ -2590,7 +2601,6 @@ class BluetoothMeshService: NSObject {
         
         // Safely extract original type
         guard payloadArray.count >= offset + 1 else { 
-            // Not enough data for type
             return 
         }
         let originalType = payloadArray[offset]
@@ -2604,6 +2614,7 @@ class BluetoothMeshService: NSObject {
             fragmentData = Data()
         }
         
+
         
         // Initialize fragment collection if needed
         if incomingFragments[fragmentID] == nil {
@@ -2617,39 +2628,48 @@ class BluetoothMeshService: NSObject {
                     return
                 }
             }
-            
             incomingFragments[fragmentID] = [:]
             fragmentMetadata[fragmentID] = (originalType, total, Date())
         }
         
         incomingFragments[fragmentID]?[index] = fragmentData
         
-        
         // Check if we have all fragments
         if let fragments = incomingFragments[fragmentID],
-           fragments.count == total {
+           let metadata = fragmentMetadata[fragmentID] {
             
-            // Reassemble the original packet
-            var reassembledData = Data()
-            for i in 0..<total {
-                if let fragment = fragments[i] {
-                    reassembledData.append(fragment)
-                } else {
-                    // Missing fragment
-                    return
+            // Check if we have all fragments by verifying each index exists
+            var hasAllFragments = true
+            var missingIndices: [Int] = []
+            for i in 0..<metadata.totalFragments {
+                if fragments[i] == nil {
+                    hasAllFragments = false
+                    missingIndices.append(i)
                 }
             }
             
-            // Successfully reassembled fragments
-            
-            // Parse and handle the reassembled packet
-            if let reassembledPacket = BitchatPacket.from(reassembledData) {
-                // Clean up
-                incomingFragments.removeValue(forKey: fragmentID)
-                fragmentMetadata.removeValue(forKey: fragmentID)
+            if hasAllFragments {
+                // Reassemble the original packet
+                var reassembledData = Data()
+                for i in 0..<metadata.totalFragments {
+                    if let fragment = fragments[i] {
+                        reassembledData.append(fragment)
+                    } else {
+                        // This shouldn't happen as we just checked
+                        return
+                    }
+                }
                 
-                // Handle the reassembled packet
-                handleReceivedPacket(reassembledPacket, from: peerID, peripheral: nil)
+                // The reassembled data is already a complete encoded packet (it was fragmented AFTER encoding)
+                // We should NOT decode it again - just parse it directly from the binary format
+                if let reassembledPacket = BinaryProtocol.decode(reassembledData) {
+                    // Clean up
+                    incomingFragments.removeValue(forKey: fragmentID)
+                    fragmentMetadata.removeValue(forKey: fragmentID)
+                    
+                    // Handle the reassembled packet
+                    handleReceivedPacket(reassembledPacket, from: peerID, peripheral: nil)
+                }
             }
         }
         
@@ -2668,9 +2688,11 @@ class BluetoothMeshService: NSObject {
         }
         
         // Remove expired fragments
-        for fragID in fragmentsToRemove {
-            incomingFragments.removeValue(forKey: fragID)
-            fragmentMetadata.removeValue(forKey: fragID)
+        if !fragmentsToRemove.isEmpty {
+            for fragID in fragmentsToRemove {
+                incomingFragments.removeValue(forKey: fragID)
+                fragmentMetadata.removeValue(forKey: fragID)
+            }
         }
         
         // Also enforce memory bounds - if we have too many fragment bytes, remove oldest
@@ -2735,6 +2757,7 @@ extension BluetoothMeshService: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
         // Optimize for 300m range - only connect to strong enough signals
         let rssiValue = RSSI.intValue
+//        print("[BLUETOOTH DEBUG] Discovered peripheral: \(peripheral.name ?? "Unknown") ID: \(peripheral.identifier) RSSI: \(rssiValue)")
         
         // Filter out very weak signals (below -90 dBm) to save battery
         guard rssiValue > -90 else { 
@@ -3537,7 +3560,6 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
                     
                     // Decode the delivery ACK
                     if let ack = DeliveryAck.decode(from: ackData) {
-                        
                         // Process the ACK
                         DeliveryTracker.shared.processDeliveryAck(ack)
                         
@@ -3552,7 +3574,6 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
             
             // Try to parse as a full inner packet (for backward compatibility and other message types)
             if let innerPacket = BitchatPacket.from(decryptedData) {
-                
                 // Process the decrypted inner packet
                 // The packet will be handled according to its recipient ID
                 // If it's for us, it won't be relayed

@@ -1790,6 +1790,8 @@ class ChatViewModel: ObservableObject {
         // This will force creation of a new identity (new fingerprint) on next launch
         meshService.emergencyDisconnectAll()
         
+
+        
         // Force immediate UserDefaults synchronization
         userDefaults.synchronize()
         

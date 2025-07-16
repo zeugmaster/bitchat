@@ -11,13 +11,22 @@ let package = Package(
     products: [
         .executable(
             name: "bitchat",
-            targets: ["bitchat"]
-        ),
+            targets: ["bitchat"])
+    ],
+    dependencies: [
     ],
     targets: [
         .executableTarget(
             name: "bitchat",
-            path: "bitchat"
-        ),
+            dependencies: [
+            ],
+            path: "bitchat",
+            resources: [
+                .process("Assets.xcassets"),
+                .process("LaunchScreen.storyboard"),
+                .process("Info-iOS.plist"),
+                .process("Info-macOS.plist")
+            ]
+        )
     ]
 )

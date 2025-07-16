@@ -362,7 +362,7 @@ struct ContentView: View {
                 }
             } else {
                 // Public chat header
-                HStack(spacing: 4) {
+                HStack(spacing: 8) {
                     Text("bitchat*")
                         .font(.system(size: 18, weight: .medium, design: .monospaced))
                         .foregroundColor(textColor)

@@ -1,6 +1,6 @@
 name: bitchat
 options:
-  bundleIdPrefix: com.bitchat
+  bundleIdPrefix: com.cypherbase.bitchat
   developmentLanguage: en
   createIntermediateGroups: true
   deploymentTarget:
@@ -18,6 +18,8 @@ targets:
   bitchat:
     type: application
     platform: [iOS, macOS]
+    attributes:
+      ProvisioningStyle: Automatic
     settings:
       base:
         PRODUCT_NAME: bitchat
@@ -83,13 +85,26 @@ targets:
       - package: NoiseC
 
 schemes:
-  bitchat:
+  "bitchat (macOS)":
     build:
       targets:
-        bitchat: all
+        bitchat: [macOS]
     run:
       config: Debug
     test:
       config: Debug
       targets:
-        - bitchatTests
+        - name: bitchatTests
+          parallelizable: false
+        
+  "bitchat (iOS)":
+    build:
+      targets:
+        bitchat: [iOS]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - name: bitchatTests
+          parallelizable: false
