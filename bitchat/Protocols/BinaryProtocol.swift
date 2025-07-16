@@ -50,15 +50,6 @@ struct BinaryProtocol {
     static func encode(_ packet: BitchatPacket) -> Data? {
         var data = Data()
         
-        SecurityLogger.log("🔵 PROTOCOL DEBUG: Encoding packet", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Type: \(MessageType(rawValue: packet.type)?.description ?? "Unknown") (\(packet.type))", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   TTL: \(packet.ttl)", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Payload size: \(packet.payload.count) bytes", 
-                         category: SecurityLogger.noise, level: .debug)
-        
         
         // Try to compress payload if beneficial
         var payload = packet.payload
@@ -71,16 +62,8 @@ struct BinaryProtocol {
                 originalPayloadSize = UInt16(payload.count)
                 payload = compressedPayload
                 isCompressed = true
-                SecurityLogger.log("   ✅ Compression successful: \(packet.payload.count) → \(compressedPayload.count) bytes", 
-                                 category: SecurityLogger.noise, level: .debug)
-            } else {
-                SecurityLogger.log("   ⚠️ Compression failed, using original payload", 
-                                 category: SecurityLogger.noise, level: .debug)
-            }
-        } else {
-            SecurityLogger.log("   ℹ️ Compression not beneficial for \(payload.count) bytes", 
-                             category: SecurityLogger.noise, level: .debug)
-        }
+            } 
+        } 
         
         // Header
         data.append(packet.version)
@@ -109,10 +92,7 @@ struct BinaryProtocol {
         let payloadDataSize = payload.count + (isCompressed ? 2 : 0)
         let payloadLength = UInt16(payloadDataSize)
         
-        SecurityLogger.log("   Header size: 13 bytes, Payload: \(payloadLength) bytes", 
-                         category: SecurityLogger.noise, level: .debug)
-        
-        
+         
         data.append(UInt8((payloadLength >> 8) & 0xFF))
         data.append(UInt8(payloadLength & 0xFF))
         
@@ -149,38 +129,16 @@ struct BinaryProtocol {
         // Apply padding to standard block sizes for traffic analysis resistance
         let optimalSize = MessagePadding.optimalBlockSize(for: data.count)
         let paddedData = MessagePadding.pad(data, toSize: optimalSize)
-        
-        let totalSize = paddedData.count
-        SecurityLogger.log("   Final encoded size: \(totalSize) bytes (padded from \(data.count) to \(optimalSize))", 
-                         category: SecurityLogger.noise, level: .debug)
-        
-        // Debug log for fragment padding issues
-        if data.count < 256 && paddedData.count != 256 && packet.type >= MessageType.fragmentStart.rawValue && packet.type <= MessageType.fragmentEnd.rawValue {
-            SecurityLogger.log("   ⚠️ Fragment not padded to 256: data=\(data.count), padded=\(paddedData.count), optimal=\(optimalSize)", 
-                             category: SecurityLogger.noise, level: .warning)
-        }
-        
-        // Check if this will need fragmentation
-        if totalSize > 512 {
-            SecurityLogger.log("   ⚠️ Packet will require fragmentation (\(totalSize) > 512 bytes)", 
-                             category: SecurityLogger.noise, level: .info)
-        }
-        
+                
         return paddedData
     }
     
     // Decode binary data to BitchatPacket
     static func decode(_ data: Data) -> BitchatPacket? {
-        SecurityLogger.log("🔷 PROTOCOL DEBUG: Decoding packet", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Raw data size: \(data.count) bytes", 
-                         category: SecurityLogger.noise, level: .debug)
         
         // Safety check for reasonable data size to prevent DoS
         guard data.count <= 128 * 1024 else { 
-            SecurityLogger.log("   🔴 Packet too large: \(data.count) bytes (max 128KB)", 
-                             category: SecurityLogger.noise, level: .error)
-            return nil 
+           return nil 
         } // Max 128KB total
         
         // Try to detect if data is padded or not
@@ -205,25 +163,17 @@ struct BinaryProtocol {
                 
                 if looksLikePadding {
                     unpaddedData = MessagePadding.unpad(data)
-                    SecurityLogger.log("   After unpadding: \(unpaddedData.count) bytes (removed \(data.count - unpaddedData.count) bytes)", 
-                                     category: SecurityLogger.noise, level: .debug)
                 } else {
                     // Not valid padding, use as-is
                     unpaddedData = data
-                    SecurityLogger.log("   No valid padding detected, using raw data: \(data.count) bytes", 
-                                     category: SecurityLogger.noise, level: .debug)
                 }
             } else {
                 // Can't be valid padding
                 unpaddedData = data
-                SecurityLogger.log("   Large packet without padding: \(data.count) bytes", 
-                                 category: SecurityLogger.noise, level: .debug)
             }
         } else {
             // Small packets should always be padded to block size
             unpaddedData = MessagePadding.unpad(data)
-            SecurityLogger.log("   After unpadding: \(unpaddedData.count) bytes", 
-                             category: SecurityLogger.noise, level: .debug)
         }
         
         // Basic length check
@@ -339,21 +289,6 @@ struct BinaryProtocol {
             signature = unpaddedData[offset..<offset+signatureSize]
         }
         
-        SecurityLogger.log("   ✅ Successfully decoded packet", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Type: \(MessageType(rawValue: type)?.description ?? "Unknown") (\(type))", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   TTL: \(ttl)", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Sender: \(senderID.hexEncodedString())", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Has recipient: \(hasRecipient)", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Payload size: \(payload.count) bytes", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Compressed: \(isCompressed)", 
-                         category: SecurityLogger.noise, level: .debug)
-        
         return BitchatPacket(
             type: type,
             senderID: senderID,
@@ -371,18 +306,6 @@ extension BitchatMessage {
     func toBinaryPayload() -> Data? {
         var data = Data()
         
-        SecurityLogger.log("🟦 MESSAGE DEBUG: Encoding BitchatMessage to binary", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   ID: \(id)", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Sender: \(sender)", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Content length: \(content.count) chars", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Private: \(isPrivate), Encrypted: \(isEncrypted)", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Channel: \(channel ?? "none")", 
-                         category: SecurityLogger.noise, level: .debug)
         
         // Message format:
         // - Flags: 1 byte (bit 0: isRelay, bit 1: isPrivate, bit 2: hasOriginalSender, bit 3: hasRecipientNickname, bit 4: hasSenderPeerID, bit 5: hasMentions, bit 6: hasChannel, bit 7: isEncrypted)
@@ -487,20 +410,12 @@ extension BitchatMessage {
             data.append(channelData.prefix(255))
         }
         
-        SecurityLogger.log("   Encoded message size: \(data.count) bytes", 
-                         category: SecurityLogger.noise, level: .debug)
-        
         return data
     }
     
     static func fromBinaryPayload(_ data: Data) -> BitchatMessage? {
         // Create an immutable copy to prevent threading issues
         let dataCopy = Data(data)
-        
-        SecurityLogger.log("🟪 MESSAGE DEBUG: Decoding BitchatMessage from binary", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Binary data size: \(data.count) bytes", 
-                         category: SecurityLogger.noise, level: .debug)
         
         
         guard dataCopy.count >= 13 else { 
@@ -656,17 +571,6 @@ extension BitchatMessage {
             encryptedContent: encryptedContent,
             isEncrypted: isEncrypted
         )
-        
-        SecurityLogger.log("   ✅ Successfully decoded message", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   ID: \(id)", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Sender: \(sender)", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Private: \(isPrivate), Encrypted: \(isEncrypted)", 
-                         category: SecurityLogger.noise, level: .debug)
-        SecurityLogger.log("   Channel: \(channel ?? "none")", 
-                         category: SecurityLogger.noise, level: .debug)
         
         return message
     }
