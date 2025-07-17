@@ -41,11 +41,23 @@ struct MessagePadding {
         
         // Last byte tells us how much padding to remove
         let paddingLength = Int(data[data.count - 1])
-        guard paddingLength > 0 && paddingLength <= data.count else { 
+        guard paddingLength > 0 && paddingLength <= data.count && paddingLength <= 255 else { 
             // Debug logging for 243-byte packets
             if data.count == 243 {
             }
             return data 
+        }
+        
+        // Additional validation: check if this looks like valid PKCS#7 padding
+        // All padding bytes should have the same value
+        if paddingLength > 1 {
+            let paddingStart = data.count - paddingLength
+            for i in paddingStart..<(data.count - 1) {
+                if data[i] != data[data.count - 1] {
+                    // Not valid PKCS#7 padding
+                    return data
+                }
+            }
         }
         
         let result = data.prefix(data.count - paddingLength)
@@ -59,13 +71,17 @@ struct MessagePadding {
     
     // Find optimal block size for data
     static func optimalBlockSize(for dataSize: Int) -> Int {
-        // Account for encryption overhead (~16 bytes for AES-GCM tag)
-        let totalSize = dataSize + 16
+        // Don't add encryption overhead - the data size already includes everything
+        // Just find the smallest block that fits the actual data
         
         // Find smallest block that fits
         for blockSize in blockSizes {
-            if totalSize <= blockSize {
-                return blockSize
+            if dataSize <= blockSize {
+                // Check if padding would exceed PKCS#7 limit (255 bytes)
+                let paddingNeeded = blockSize - dataSize
+                if paddingNeeded <= 255 {
+                    return blockSize
+                }
             }
         }
         
