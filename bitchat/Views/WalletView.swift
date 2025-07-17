@@ -46,9 +46,6 @@ struct WalletView: View {
                 // Quick actions
                 quickActions
                 
-                // Mints section
-                mintsSection
-                
                 Spacer()
             }
             .background(backgroundColor)
@@ -90,41 +87,38 @@ struct WalletView: View {
     
     private var balanceSection: some View {
         VStack(spacing: 12) {
-            Text("balance")
+            Text("balances by mint")
                 .font(.system(size: 14, weight: .semibold, design: .monospaced))
                 .foregroundColor(textColor)
             
-            VStack(spacing: 8) {
-                Text(walletManager.balance.formattedAmount)
-                    .font(.system(size: 28, weight: .bold, design: .monospaced))
-                    .foregroundColor(textColor)
-                
-                HStack(spacing: 16) {
-                    VStack(spacing: 4) {
-                        Text("\(walletManager.balance.proofsCount)")
-                            .font(.system(size: 16, weight: .medium, design: .monospaced))
-                            .foregroundColor(textColor)
-                        Text("proofs")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(secondaryTextColor)
-                    }
-                    
-                    VStack(spacing: 4) {
-                        Text("\(walletManager.balance.mintsCount)")
-                            .font(.system(size: 16, weight: .medium, design: .monospaced))
-                            .foregroundColor(textColor)
-                        Text("mints")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(secondaryTextColor)
+            if walletManager.mints.isEmpty {
+                VStack(spacing: 8) {
+                    Text("0 sats")
+                        .font(.system(size: 28, weight: .bold, design: .monospaced))
+                        .foregroundColor(textColor)
+                    Text("no mints added yet")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(secondaryTextColor)
+                }
+                .padding(.vertical, 20)
+                .padding(.horizontal, 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(textColor.opacity(0.3), lineWidth: 1)
+                )
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(walletManager.mints) { mint in
+                        mintBalanceRowView(mint: mint)
                     }
                 }
+                .padding(.vertical, 12)
+                .padding(.horizontal, 16)
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(textColor.opacity(0.3), lineWidth: 1)
+                )
             }
-            .padding(.vertical, 20)
-            .padding(.horizontal, 20)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(textColor.opacity(0.3), lineWidth: 1)
-            )
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 30)
@@ -175,70 +169,25 @@ struct WalletView: View {
         .padding(.horizontal, 20)
         .padding(.bottom, 30)
     }
+
     
-    private var mintsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("mints")
-                .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                .foregroundColor(textColor)
-            
-            if walletManager.mints.isEmpty {
-                Text("no mints added yet")
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(secondaryTextColor)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 40)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(walletManager.mints) { mint in
-                            mintRowView(mint: mint)
-                        }
-                    }
-                }
-                .frame(maxHeight: 200)
-            }
-        }
-        .padding(.horizontal, 20)
-    }
-    
-    private func mintRowView(mint: StoredMint) -> some View {
+    private func mintBalanceRowView(mint: StoredMint) -> some View {
         HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(mint.name ?? "Unnamed Mint")
-                    .font(.system(size: 14, weight: .medium, design: .monospaced))
-                    .foregroundColor(textColor)
-                
-                Text(mint.url)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(secondaryTextColor)
-                    .lineLimit(1)
-            }
+            Text(mint.url)
+                .font(.system(size: 14, weight: .medium, design: .monospaced))
+                .foregroundColor(textColor)
+                .lineLimit(1)
             
             Spacer()
             
-            VStack(alignment: .trailing, spacing: 4) {
-                Text("\(walletManager.getBalanceForMint(mint.url)) sats")
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundColor(textColor)
-                
-                Text("\(walletManager.getProofsForMint(mint.url).count) proofs")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(secondaryTextColor)
-            }
+            Text("\(walletManager.getBalanceForMint(mint.url)) sats")
+                .font(.system(size: 16, weight: .bold, design: .monospaced))
+                .foregroundColor(textColor)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(textColor.opacity(0.2), lineWidth: 1)
-        )
-        .contextMenu {
-            Button("Remove Mint", role: .destructive) {
-                walletManager.removeMint(mint)
-            }
-        }
     }
+
     
     private var addMintSheet: some View {
         NavigationView {

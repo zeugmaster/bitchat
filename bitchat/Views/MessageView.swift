@@ -14,11 +14,19 @@ struct MessageView: View {
     let viewModel: ChatViewModel
     let colorScheme: ColorScheme
     
-    @State private var showReceiveToken = false
-    @State private var detectedToken: String?
     @State private var showAlert = false
     @State private var alertMessage = ""
     @State private var alertTitle = ""
+    
+    // Token receive states per token (using token string as key)
+    @State private var tokenReceiveStates: [String: TokenReceiveState] = [:]
+    
+    enum TokenReceiveState {
+        case idle
+        case receiving
+        case success(amount: Int)
+        case error(message: String)
+    }
     
     private var textColor: Color {
         colorScheme == .dark ? Color.green : Color(red: 0, green: 0.5, blue: 0)
@@ -48,31 +56,23 @@ struct MessageView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .top, spacing: 0) {
                         // Enhanced message content with cashu token detection
-                        messageContentView
-                        
-                        // Delivery status indicator for private messages
-                        if message.isPrivate && message.sender == viewModel.nickname,
-                           let status = message.deliveryStatus {
-                            DeliveryStatusView(status: status, colorScheme: colorScheme)
-                                .padding(.leading, 4)
+                        VStack(alignment: .leading, spacing: 8) {
+                            // Show message content without token
+                            messageContentView
+                            
+                            // Show token card if detected
+                            if let token = WalletManager.detectCashuToken(in: message.content) {
+                                cashuTokenView(token: token)
+                            }
                         }
+                        
+                        Spacer()
                     }
-                    
-                    // Cashu token detection and receive button
-                    if let token = WalletManager.detectCashuToken(in: message.content) {
-                        cashuTokenView(token: token)
-                    }
-                    
-                    // Link previews would be handled here in the future
-                    // For now, basic link detection is disabled
                 }
             }
         }
-        .sheet(isPresented: $showReceiveToken) {
-            receiveTokenSheet
-        }
         .alert(alertTitle, isPresented: $showAlert) {
-            Button("OK") { }
+            Button("OK", role: .cancel) { }
         } message: {
             Text(alertMessage)
         }
@@ -87,27 +87,28 @@ struct MessageView: View {
             displayContent = message.content
         }
         
-        // Always return a Text view, but with different content
-        return Text(displayContent.isEmpty ? "" : viewModel.formatMessageAsText(
-            BitchatMessage(
-                sender: message.sender,
-                content: displayContent,
-                timestamp: message.timestamp,
-                isRelay: message.isRelay,
-                originalSender: message.originalSender,
-                isPrivate: message.isPrivate,
-                recipientNickname: message.recipientNickname,
-                senderPeerID: message.senderPeerID,
-                mentions: message.mentions,
-                channel: message.channel,
-                deliveryStatus: message.deliveryStatus
-            ),
-            colorScheme: colorScheme
-        ))
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: displayContent.isEmpty ? 0 : nil)
+        // Only show the content if there's something left after removing the token
+        if !displayContent.isEmpty {
+            return AnyView(Text(viewModel.formatMessageAsText(
+                BitchatMessage(
+                    sender: message.sender,
+                    content: displayContent,
+                    timestamp: message.timestamp,
+                    isRelay: message.isRelay,
+                    originalSender: message.originalSender,
+                    senderPeerID: message.senderPeerID,
+                    mentions: message.mentions,
+                    channel: message.channel,
+                    deliveryStatus: message.deliveryStatus
+                ),
+                colorScheme: colorScheme
+            ))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading))
+        } else {
+            return AnyView(EmptyView())
+        }
     }
     
     // Token parsing function to extract amount and mint info
@@ -137,6 +138,7 @@ struct MessageView: View {
     
     private func cashuTokenView(token: String) -> some View {
         let tokenInfo = parseTokenInfo(token)
+        let receiveState = tokenReceiveStates[token] ?? .idle
         
         return HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 6) {
@@ -178,145 +180,176 @@ struct MessageView: View {
                     }
                 } else {
                     // Fallback when parsing fails
-                    Text("tap to view and receive")
+                    Text("tap to receive")
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(secondaryTextColor)
+                }
+                
+                // Show receive state feedback
+                switch receiveState {
+                case .receiving:
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("receiving...")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(secondaryTextColor)
+                    }
+                case .success(let amount):
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(.green)
+                        Text("received \(amount) sats!")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.green)
+                    }
+                case .error(let message):
+                    HStack(spacing: 4) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(.red)
+                        Text(message)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.red)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                case .idle:
+                    EmptyView()
                 }
             }
             
             Spacer()
             
-            Button(action: {
-                print("[DEBUG] Token button tapped, setting detectedToken")
-                detectedToken = token
-                showReceiveToken = true
-            }) {
+            // Receive button or status indicator
+            switch receiveState {
+            case .receiving:
                 HStack(spacing: 4) {
-                    Image(systemName: "arrow.down.circle.fill")
-                        .font(.system(size: 14))
-                    Text("receive")
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("receiving")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 }
                 .foregroundColor(.white)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(Color.orange)
+                .background(Color.orange.opacity(0.6))
                 .cornerRadius(6)
+                
+            case .success:
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 14))
+                    Text("received")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.green)
+                .cornerRadius(6)
+                
+            case .error:
+                Button(action: {
+                    receiveToken(token)
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.counterclockwise.circle.fill")
+                            .font(.system(size: 14))
+                        Text("retry")
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.red)
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+                
+            case .idle:
+                Button(action: {
+                    receiveToken(token)
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 14))
+                        Text("receive")
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.orange)
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color.orange.opacity(0.08))
+                .fill(backgroundColorForState(receiveState))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                        .stroke(borderColorForState(receiveState), lineWidth: 1)
                 )
         )
     }
     
-    private var receiveTokenSheet: some View {
-        NavigationView {
-            VStack(spacing: 20) {
-                Image(systemName: "bitcoinsign.circle.fill")
-                    .font(.system(size: 48))
-                    .foregroundColor(.orange)
-                
-                Text("ecash token")
-                    .font(.system(size: 20, weight: .semibold, design: .monospaced))
-                    .foregroundColor(textColor)
-                
-                if let token = detectedToken {
-                    // Show the raw token in a scrollable view
-                    ScrollView {
-                        Text(token)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(textColor)
-                            .textSelection(.enabled)
-                            .padding()
-                            .background(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(Color.orange.opacity(0.1))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-                                    )
-                            )
-                    }
-                    .frame(maxHeight: 200)
-                    
-                    Button(action: receiveToken) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "arrow.down.circle.fill")
-                                .font(.system(size: 16))
-                            Text("receive token")
-                        }
-                        .font(.system(size: 16, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(Color.orange)
-                        .cornerRadius(10)
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    Text("No token detected")
-                        .font(.system(size: 14, design: .monospaced))
-                        .foregroundColor(secondaryTextColor)
-                        .padding()
-                }
-                
-                Spacer()
-            }
-            .padding()
-            .background(backgroundColor)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        showReceiveToken = false
-                        detectedToken = nil
-                    }
-                    .foregroundColor(textColor)
-                }
-            }
-        }
-        .onAppear {
-            print("[DEBUG] Receive token sheet appeared")
-            print("[DEBUG] detectedToken: \(detectedToken ?? "nil")")
+    private func backgroundColorForState(_ state: TokenReceiveState) -> Color {
+        switch state {
+        case .idle, .receiving:
+            return Color.orange.opacity(0.08)
+        case .success:
+            return Color.green.opacity(0.08)
+        case .error:
+            return Color.red.opacity(0.08)
         }
     }
     
-    private func receiveToken() {
-        guard let tokenString = detectedToken else { 
-            print("[DEBUG] No detectedToken available")
-            return 
+    private func borderColorForState(_ state: TokenReceiveState) -> Color {
+        switch state {
+        case .idle, .receiving:
+            return Color.orange.opacity(0.3)
+        case .success:
+            return Color.green.opacity(0.3)
+        case .error:
+            return Color.red.opacity(0.3)
         }
+    }
+    
+    private func receiveToken(_ tokenString: String) {
+        print("[DEBUG] Attempting to receive token directly: \(String(tokenString.prefix(50)))...")
         
-        print("[DEBUG] Attempting to receive token: \(String(tokenString.prefix(50)))...")
+        // Set receiving state
+        tokenReceiveStates[tokenString] = .receiving
         
         Task {
             do {
                 let amount = try await WalletManager.shared.receiveToken(tokenString)
                 await MainActor.run {
-                    showReceiveToken = false
-                    detectedToken = nil
-                    alertTitle = "Success!"
-                    alertMessage = "Received \(amount) sats to your wallet!"
-                    showAlert = true
+                    // Keep token permanently in success state - don't allow re-redemption
+                    tokenReceiveStates[tokenString] = .success(amount: amount)
                 }
             } catch {
                 await MainActor.run {
-                    // Simplified error handling
-                    alertTitle = "Token Receive Error"
-                    
-                    if error.localizedDescription.contains("blindedMessageAlreadySigned") {
-                        alertMessage = "This token has already been spent or received."
+                    let errorMessage: String
+                    if error.localizedDescription.contains("blindedMessageAlreadySigned") || error.localizedDescription.contains("alreadySpent") {
+                        errorMessage = "already spent"
+                    } else if error.localizedDescription.contains("network") || error.localizedDescription.contains("Network") {
+                        errorMessage = "network error"
                     } else {
-                        alertMessage = "Failed to receive token: \(error.localizedDescription)"
+                        errorMessage = "receive failed"
                     }
                     
-                    showAlert = true
+                    tokenReceiveStates[tokenString] = .error(message: errorMessage)
+                    
+                    // Auto-hide error state after 8 seconds so users can read the message
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                        tokenReceiveStates[tokenString] = .idle
+                    }
                 }
             }
         }
